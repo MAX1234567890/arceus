@@ -1,6 +1,8 @@
 const {Client, RichEmbed} = require('discord.js');
 const client = new Client();
 const fs = require('fs');
+const {BattleMovedex} = require("./data/moves");
+const {BattleLearnsets} = require("./data/learnsets");
 const {BattlePokedex} = require("./data/pokedex");
 
 const contents = fs.readFileSync('token.json', 'utf8');
@@ -248,6 +250,31 @@ function calculateSpe(pokemon) {
     return Math.floor((2 * base + iv) * level / 100) + 5;
 }
 
+String.prototype.toTitleCase = function () {
+    var i, j, str, lowers, uppers;
+    str = this.replace(/([^\W_]+[^\s-]*) */g, function (txt) {
+        return txt.charAt(0).toUpperCase() + txt.substr(1).toLowerCase();
+    });
+
+    // Certain minor words should be left lowercase unless
+    // they are the first or last words in the string
+    lowers = ['A', 'An', 'The', 'And', 'But', 'Or', 'For', 'Nor', 'As', 'At',
+        'By', 'For', 'From', 'In', 'Into', 'Near', 'Of', 'On', 'Onto', 'To', 'With'];
+    for (i = 0, j = lowers.length; i < j; i++)
+        str = str.replace(new RegExp('\\s' + lowers[i] + '\\s', 'g'),
+            function (txt) {
+                return txt.toLowerCase();
+            });
+
+    // Certain words such as initialisms or acronyms should be left uppercase
+    uppers = ['Id', 'Tv'];
+    for (i = 0, j = uppers.length; i < j; i++)
+        str = str.replace(new RegExp('\\b' + uppers[i] + '\\b', 'g'),
+            uppers[i].toUpperCase());
+
+    return str;
+}
+
 
 client.on('ready', () => {
     console.log(`Logged in as ${client.user.tag}!`);
@@ -259,7 +286,8 @@ client.on('message', message => {
     try {
         if (message.content.startsWith("a!")) {
             // Parse command (split by space to get parts)
-            let rest = message.content.substr(2).split(" ");
+            let rest = message.content.substr(2).match(/(?:[^\s"]+|"[^"]*")+/g);
+            rest = rest.map((x) => x.replace('"', ''));
 
             // Catch command
             if (rest[0] === "catch") {
@@ -319,6 +347,10 @@ client.on('message', message => {
             } else if (rest[0] === "view") {
                 let number = +(rest[1]);
                 number--;
+                if (rest.length === 1) {
+                    number = database.user[message.author.id].selected;
+                }
+                if (number === undefined) number = 1;
 
                 const pokemonList = database.user[message.author.id].pokemon;
                 if (number >= pokemonList.length) {
@@ -334,6 +366,7 @@ client.on('message', message => {
                         // Set the color of the embed
                         .setColor(parseInt(convert(BattlePokedex[pokemon.speciesID].color.toLowerCase()).substr(1), 16))
                         // Add fields
+                        .addField('XP', `${pokemon.xp}/2000`, true)
                         .addField('HP', `${calculateHP(pokemon)} | IV: ${pokemon.ivs[0]}/31`, true)
                         .addField('Attack', `${calculateAtk(pokemon)} | IV: ${pokemon.ivs[1]}/31`, true)
                         .addField('Defense', `${calculateDef(pokemon)} | IV: ${pokemon.ivs[2]}/31`, true)
@@ -347,17 +380,108 @@ client.on('message', message => {
 
                 let msg = message.channel.send(embed);
             } else if (rest[0] === "moves") {
+                let pokemon = database.user[message.author.id].pokemon[database.user[message.author.id].selected];
                 if (rest.length === 1) {
+                    // Generate available moves
+                    let available = "Available: ";
+                    let moves = Object.keys(BattleLearnsets[pokemon.speciesID].learnset);
+
+                    for (let i of moves) {
+                        available += "\n" + BattleMovedex[i].name;
+                    }
+
                     // Output current and available moves
+                    const embed = new RichEmbed()
+                    // Set the title of the field
+                        .setTitle(`Level ${pokemon.level} ${pokemon.species}`)
+                        // Set the color of the embed
+                        .setColor(parseInt(convert(BattlePokedex[pokemon.speciesID].color.toLowerCase()).substr(1), 16))
+                        // Add fields
+                        .addField("Move 1", pokemon.moves[0].name, true)
+                        .addField("Move 2", pokemon.moves[1].name, true)
+                        .addField("Move 3", pokemon.moves[2].name, true)
+                        .addField("Move 4", pokemon.moves[3].name, true)
+                        .setDescription(available)
+                        // Image
+                        .setImage(`http://play.pokemonshowdown.com/sprites/ani/${pokemon.speciesID}.gif`);
+                    message.channel.send(embed);
+                    return;
+                } else if (rest.length === 5) {
+                    const newMoves = [rest[1].replace('"', ''), rest[2].replace('"', ''), rest[3].replace('"', ''), rest[4].replace('"', '')];
+                    // Verify new moves
+                    let validMoves = Object.keys(BattleLearnsets[pokemon.speciesID].learnset).map((x) => x.toLowerCase());
+                    let valid = true;
+
+                    for (let move of newMoves) {
+                        if (validMoves.indexOf(move.toLowerCase()) === -1) {
+                            valid = false;
+                            console.log(move);
+                            break;
+                        }
+                    }
+
+                    if (valid) {
+                        database.user[message.author.id].pokemon[database.user[message.author.id].selected].moves = [
+                            {'name': BattleMovedex[newMoves[0]].name, 'id': newMoves[0]},
+                            {'name': BattleMovedex[newMoves[1]].name, 'id': newMoves[1]},
+                            {'name': BattleMovedex[newMoves[2]].name, 'id': newMoves[2]},
+                            {'name': BattleMovedex[newMoves[3]].name, 'id': newMoves[3]}
+                        ];
+
+                        message.channel.send("Set moves!");
+                    } else {
+                        message.channel.send("Invalid!");
+                    }
                 }
+
+                saveDB();
+            } else if (rest[0] === "select") {
+                let index = 0;
+                if (rest.length > 1) {
+                    index = +rest[1];
+                }
+
+                index--;
+
+                const pokemonList = database.user[message.author.id].pokemon;
+                if (index >= pokemonList.length) {
+                    return message.channel.send(`You only have ${pokemonList.length} pokemon!`);
+                }
+
+                database.user[message.author.id].selected = index;
+                const pokemon = pokemonList[index];
+                message.channel.send(`Selected your Level ${pokemon.level} ${pokemon.species}!`);
+                saveDB();
             }
         } else {
-            if (Math.random() < 1) { // 1% chance per message to spawn Pokemon TODO: change back to 0.01
+            if (database.user.hasOwnProperty(message.author.id) && database.user[message.author.id].hasOwnProperty("selected") && database.user[message.author.id].pokemon.length > database.user[message.author.id].selected) {
+                let u = database.user[message.author.id];
+                if (!u.hasOwnProperty("lastXPTime")) database.user[message.author.id].lastXPTime = 0;
+                if ((new Date().getTime()) - u.lastXPTime > 1000 * 60) {
+                    // Add XP
+                    let sel = database.user[message.author.id].selected;
+                    database.user[message.author.id].pokemon[sel].xp += 200;
+                    while (database.user[message.author.id].pokemon[sel].xp > 2000) {
+                        database.user[message.author.id].pokemon[sel].xp -= 2000;
+                        database.user[message.author.id].pokemon[sel].level++;
+
+                        if (database.user[message.author.id].pokemon[sel].level > 100) database.user[message.author.id].pokemon[sel].level = 100;
+                        // TODO: evolution
+
+                        let pokemon = database.user[message.author.id].pokemon[sel];
+                        message.reply(`Your ${pokemon.species} has leveled up to Level ${pokemon.level}!`);
+                    }
+
+                    database.user[message.author.id].lastXPTime = new Date().getTime();
+                    saveDB();
+                }
+            }
+            if (Math.random() < 1) { // 1% chance per message to spawn Pokemon TODO go back
                 if (!database.wild.hasOwnProperty(message.guild.id))
                     database[message.guild.id] = {};
 
                 // Generate species
-                let speciesID = getRandomKey(BattlePokedex);
+                let speciesID = getRandomKey(BattlePokedex); // TODO: disable formes
                 let species = BattlePokedex[speciesID];
 
                 // Spawn Pokemon
@@ -367,7 +491,12 @@ client.on('message', message => {
                     ivs: generateNewIVS(),
                     ability: species.abilities[getRandomKey(species.abilities)],
                     level: generateNewLevel(),
-                    speciesID: speciesID
+                    speciesID: speciesID,
+                    xp: 0,
+                    moves: [{id: 'tackle', name: 'Tackle'}, {id: 'tackle', name: 'Tackle'}, {
+                        id: 'tackle',
+                        name: 'Tackle'
+                    }, {id: 'tackle', name: 'Tackle'}]
                     // TODO: nature/evs?
                 };
 
