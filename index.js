@@ -1,9 +1,14 @@
 const {Client, RichEmbed} = require('discord.js');
 const client = new Client();
 const fs = require('fs');
+const {BattleStream, getPlayerStreams} = require("./pokemonshowdown/pokemon-showdown/.sim-dist/battle-stream");
+const {RandomPlayerAI} = require("./pokemonshowdown/pokemon-showdown/.sim-dist/tools/random-player-ai");
 const {BattleMovedex} = require("./pokemonshowdown/pokemon-showdown/data/moves");
 const {BattleLearnsets} = require("./pokemonshowdown/pokemon-showdown/data/learnsets");
 const {BattlePokedex} = require("./pokemonshowdown/pokemon-showdown/data/pokedex");
+const {Dex} = require('./pokemonshowdown/pokemon-showdown/.sim-dist/dex');
+const _battlestream = require('./pokemonshowdown/pokemon-showdown/.sim-dist/battle-stream');
+const _prng = require('./pokemonshowdown/pokemon-showdown/.sim-dist/prng');
 
 const contents = fs.readFileSync('token.json', 'utf8');
 const token = JSON.parse(contents).live;
@@ -45,6 +50,199 @@ function sum(ivs) {
 
     return i;
 }
+
+class TextPlayer extends _battlestream.BattlePlayer {
+    constructor(
+        playerStream,
+        options = {},
+        debug = false
+    ) {
+        super(playerStream, debug);
+        this.move = options.move || 1.0;
+        this.mega = options.mega || 0;
+        this.prng = options.seed && !Array.isArray(options.seed) ? options.seed : new (0, _prng.PRNG)(options.seed);
+        this.result = undefined;
+    }
+
+    receiveError(error) {
+        // If we made an unavailable choice we will receive a followup request to
+        // allow us the opportunity to correct our decision.
+        if (error.message.startsWith('[Unavailable choice]')) return;
+        throw error;
+    }
+
+    receiveRequest(request) {
+        if (request.wait) {
+            // wait request
+            // do nothing
+        } else if (request.forceSwitch) {
+            // switch request
+            const pokemon = request.side.pokemon;
+            const chosen = [];
+            const choices = request.forceSwitch.map((mustSwitch) => {
+                if (!mustSwitch) return `pass`;
+
+                const canSwitch = [1, 2, 3, 4, 5, 6].filter(i => (
+                    pokemon[i - 1] &&
+                    // not active
+                    i > request.forceSwitch.length &&
+                    // not chosen for a simultaneous switch
+                    !chosen.includes(i) &&
+                    // not fainted
+                    !pokemon[i - 1].condition.endsWith(` fnt`)
+                ));
+
+                if (!canSwitch.length) return `pass`;
+                const target = this.chooseSwitch(
+                    canSwitch.map(slot => ({slot, pokemon: pokemon[slot - 1]})));
+                chosen.push(target);
+                return `switch ${target}`;
+            });
+
+            this.choose(choices.join(`, `));
+        } else if (request.active) {
+            // move request
+            let [canMegaEvo, canUltraBurst, canZMove] = [true, true, true];
+            const pokemon = request.side.pokemon;
+            const chosen = [];
+            const choices = request.active.map((active, i) => {
+                if (pokemon[i].condition.endsWith(` fnt`)) return `pass`;
+
+                canMegaEvo = canMegaEvo && active.canMegaEvo;
+                canUltraBurst = canUltraBurst && active.canUltraBurst;
+                canZMove = canZMove && !!active.canZMove;
+
+                let canMove = [1, 2, 3, 4].slice(0, active.moves.length).filter(j => (
+                    // not disabled
+                    !active.moves[j - 1].disabled
+                    // NOTE: we don't actually check for whether we have PP or not because the
+                    // simulator will mark the move as disabled if there is zero PP and there are
+                    // situations where we actually need to use a move with 0 PP (Gen 1 Wrap).
+                )).map(j => ({
+                    slot: j,
+                    move: active.moves[j - 1].move,
+                    target: active.moves[j - 1].target,
+                    zMove: false,
+                }));
+                if (canZMove) {
+                    canMove.push(...[1, 2, 3, 4].slice(0, active.canZMove.length)
+                        .filter(j => active.canZMove[j - 1])
+                        .map(j => ({
+                            slot: j,
+                            move: active.canZMove[j - 1].move,
+                            target: active.canZMove[j - 1].target,
+                            zMove: true,
+                        })));
+                }
+
+                // Filter out adjacentAlly moves if we have no allies left, unless they're our
+                // only possible move options.
+                const hasAlly = pokemon.length > 1 && !pokemon[i ^ 1].condition.endsWith(` fnt`);
+                const filtered = canMove.filter(m => m.target !== `adjacentAlly` || hasAlly);
+                canMove = filtered.length ? filtered : canMove;
+
+                const moves = canMove.map(m => {
+                    let move = `move ${m.slot}`;
+                    // NOTE: We don't generate all possible targeting combinations.
+                    if (request.active.length > 1) {
+                        if ([`normal`, `any`, `adjacentFoe`].includes(m.target)) {
+                            move += ` ${1 + Math.floor(this.prng.next() * 2)}`;
+                        }
+                        if (m.target === `adjacentAlly`) {
+                            move += ` -${(i ^ 1) + 1}`;
+                        }
+                        if (m.target === `adjacentAllyOrSelf`) {
+                            if (hasAlly) {
+                                move += ` -${1 + Math.floor(this.prng.next() * 2)}`;
+                            } else {
+                                move += ` -${i + 1}`;
+                            }
+                        }
+                    }
+                    if (m.zMove) move += ` zmove`;
+                    return {choice: move, move: m};
+                });
+
+                const canSwitch = [1, 2, 3, 4, 5, 6].filter(j => (
+                    pokemon[j - 1] &&
+                    // not active
+                    !pokemon[j - 1].active &&
+                    // not chosen for a simultaneous switch
+                    !chosen.includes(j) &&
+                    // not fainted
+                    !pokemon[j - 1].condition.endsWith(` fnt`)
+                ));
+                const switches = active.trapped ? [] : canSwitch;
+
+                if (switches.length && (!moves.length || this.prng.next() > this.move)) {
+                    const target = this.chooseSwitch(
+                        canSwitch.map(slot => ({slot, pokemon: pokemon[slot - 1]})));
+                    chosen.push(target);
+                    return `switch ${target}`;
+                } else if (moves.length) {
+                    const move = this.chooseMove(moves);
+                    if (move.endsWith(` zmove`)) {
+                        canZMove = false;
+                        return move;
+                    } else if ((canMegaEvo || canUltraBurst) && this.prng.next() < this.mega) {
+                        if (canMegaEvo) {
+                            canMegaEvo = false;
+                            return `${move} mega`;
+                        } else {
+                            canUltraBurst = false;
+                            return `${move} ultra`;
+                        }
+                    } else {
+                        return move;
+                    }
+                } else {
+                    throw new Error(`${this.constructor.name} unable to make choice ${i}. request='${request}',` +
+                        ` chosen='${chosen}', (mega=${canMegaEvo}, ultra=${canUltraBurst}, zmove=${canZMove})`);
+                }
+            });
+            this.choose(choices.join(`, `));
+        } else {
+            // team preview?
+            this.choose(this.chooseTeamPreview(request.side.pokemon));
+        }
+    }
+
+    chooseTeamPreview(team) {
+        return `default`;
+    }
+
+    query(text, callback) {
+        'use strict';
+        process.stdin.resume();
+        process.stdout.write(text);
+        process.stdin.once("data", function (data) {
+            callback(data.toString().trim());
+        });
+    }
+
+
+    chooseMove(moves) {
+        let now = new Date().getTime();
+
+        this.result = undefined;
+
+        while ((new Date().getTime() - now < 10_000) && this.result === undefined) {
+
+        }
+
+        let res = this.result === undefined ? this.prng.sample(moves).choice : moves[this.result].choice;
+        console.log(res);
+        return res;
+    }
+
+    chooseSwitch(switches) {
+        return this.prng.sample(switches).slot;
+    }
+}
+
+IN_MEM_DB = { // channel_id => text_player
+
+};
 
 function convert(color) {
     var colours = {
@@ -289,8 +487,13 @@ client.on('message', message => {
             let rest = message.content.substr(2).match(/(?:[^\s"]+|"[^"]*")+/g);
             rest = rest.map((x) => x.replace('"', ''));
 
+            // Move usage
+            if (rest[0] === 'use') {
+                let choice = +rest[1] - 1;
+                IN_MEM_DB[message.channel.id].result = choice;
+            }
             // Catch command
-            if (rest[0] === "catch") {
+            else if (rest[0] === "catch") {
                 // Look up pokemon in this channel
                 if (database.wild.hasOwnProperty(message.guild.id) && !database.wild[message.guild.id].latestPokemon.caught) {
                     let pokemon = database.wild[message.guild.id].latestPokemon.pokemon;
@@ -452,6 +655,77 @@ client.on('message', message => {
                 const pokemon = pokemonList[index];
                 message.channel.send(`Selected your Level ${pokemon.level} ${pokemon.species}!`);
                 saveDB();
+            } else if (rest[0] === "battle") {
+                // a!battle <ping> p1 p2 p3 p4 p5 p6
+                if (rest.length !== 8) {
+                    message.channel.send("Not enough args! Example: `a!battle @UserName 1 2 3 4 5 6`");
+                    return;
+                }
+
+                if (IN_MEM_DB[message.channel.id] !== undefined) {
+                    message.channel.send("There is already a battle in this channel!");
+                    return;
+                }
+
+                let pokemonList = database.user[message.author.id].pokemon;
+                let team = [];
+
+                for (let i = 0; i < 6; i++) {
+                    let pokemon = pokemonList[+(rest[i + 2]) - 1];
+                    if (pokemon === undefined) {
+                        message.channel.send(`Invalid pokemon ${rest[i + 2]}!`);
+                        return;
+                    }
+                    team.push({
+                        name: "",
+                        species: pokemon.speciesID,
+                        item: "",
+                        ability: pokemon.ability,
+                        moves: pokemon.moves.map((x) => x.id),
+                        nature: "docile",
+                        gender: "m",
+                        evs: [0, 0, 0, 0, 0, 0],
+                        ivs: pokemon.ivs,
+                        level: pokemon.level,
+                    });
+                }
+
+
+                const spec = {
+                    formatid: "gen8customgame",
+                };
+
+                const p1spec = {
+                    name: message.author.name,
+                    team: Dex.packTeam(team),
+                };
+                const p2spec = {
+                    name: message.author.name,
+                    team: Dex.packTeam(Dex.generateTeam('gen8randombattle')),
+                };
+
+                const streams = getPlayerStreams(new BattleStream());
+                const p1 = new TextPlayer(streams.p1);
+                IN_MEM_DB[message.channel.id] = p1;
+                const p2 = new RandomPlayerAI(streams.p2);
+
+                (async () => {
+                    p1.start();
+                    p2.start();
+                    streams.omniscient.write(`>start ${JSON.stringify(spec)}
+>player p1 ${JSON.stringify(p1spec)}
+>player p2 ${JSON.stringify(p2spec)}`);
+
+                    let chunk;
+                    // tslint:disable-next-line no-conditional-assignment
+                    while ((chunk = await streams.omniscient.read())) {
+                        // console.log(BattleLog.parseLine(chunk));
+                        message.channel.send(chunk);
+                    }
+
+                    // Battle over
+                    IN_MEM_DB[message.channel.id] = undefined;
+                })();
             }
         } else {
             if (database.user.hasOwnProperty(message.author.id) && database.user[message.author.id].hasOwnProperty("selected") && database.user[message.author.id].pokemon.length > database.user[message.author.id].selected) {
