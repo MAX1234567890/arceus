@@ -1,3 +1,4 @@
 token.json
 .idea/*
 node_modules/*
+pokemonshowdown/pokemon-showdown/node_modules/*

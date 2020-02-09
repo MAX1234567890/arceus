@@ -1,9 +1,9 @@
 const {Client, RichEmbed} = require('discord.js');
 const client = new Client();
 const fs = require('fs');
-const {BattleMovedex} = require("./data/moves");
-const {BattleLearnsets} = require("./data/learnsets");
-const {BattlePokedex} = require("./data/pokedex");
+const {BattleMovedex} = require("./pokemonshowdown/pokemon-showdown/data/moves");
+const {BattleLearnsets} = require("./pokemonshowdown/pokemon-showdown/data/learnsets");
+const {BattlePokedex} = require("./pokemonshowdown/pokemon-showdown/data/pokedex");
 
 const contents = fs.readFileSync('token.json', 'utf8');
 const token = JSON.parse(contents).live;
